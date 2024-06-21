@@ -23,6 +23,7 @@ const sendMessage = ( chatId ) => async ( text ) => {
 
 app.post(`/webhook/${ BOT_TOKEN }`, async ( req, res ) => {
     const message = req.body.message;
+    res.send("Hello world");
     console.log("message: ", JSON.stringify(message, null, 2));
     const chatId = message.chat.id;
     const reply = sendMessage(chatId)
