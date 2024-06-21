@@ -23,7 +23,7 @@ const sendMessage = ( chatId ) => async ( text ) => {
 
 app.post(`/webhook/${ BOT_TOKEN }`, async ( req, res ) => {
     const message = req.body.message;
-    res.send("Hello world");
+    res.send("success");
     console.log("message: ", JSON.stringify(message, null, 2));
     const chatId = message.chat.id;
     const reply = sendMessage(chatId)
@@ -35,26 +35,26 @@ app.post(`/webhook/${ BOT_TOKEN }`, async ( req, res ) => {
 
         try {
             // Get file path
-            await reply('getting your file..')
+            await reply(`${ originalFileName }\nGetting your file - `)
             const fileUrl = `${ BASE_URL }/bot${ BOT_TOKEN }/getFile?file_id=${ fileId }`;
-            await reply('file downloaded..')
             console.log("fileurl: ", fileUrl);
             const fileResponse = await axios.get(fileUrl);
+            await reply(`${ originalFileName }\nFile downloaded `)
             const filePath = fileResponse.data.result.file_path;
 
             const sourcePath = filePath;
             const destinationPath = path.join(DOWNLOAD_PATH, originalFileName);
 
-            await reply('moving to plex media')
+            await reply(`${ originalFileName }\nMoving to plex media`)
 
             if (fs.existsSync(sourcePath)) {
                 fs.rename(sourcePath, destinationPath, async ( err ) => {
                     if (err) {
                         console.error('Error moving file:', err);
-                        await reply('Error moving file')
+                        await reply(`${ originalFileName }\nError moving file`)
                     } else {
                         console.log(`File moved to ${ destinationPath }`);
-                        await reply('moved file successfully')
+                        await reply(`${ originalFileName }\nmoved file successfully`)
                     }
                 });
             } else {
