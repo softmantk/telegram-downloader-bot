@@ -24,11 +24,13 @@ const sendMessage = ( chatId ) => async ( text ) => {
 app.post(`/webhook/${ BOT_TOKEN }`, async ( req, res ) => {
     const message = req.body.message;
     console.log("message: ", JSON.stringify(message, null, 2));
+    const chatId = message.chat.id;
+    const reply = sendMessage(chatId)
+
     if (message && message.document) {
         const fileId = message.document.file_id;
         const originalFileName = message.document.file_name;
-        const chatId = message.chat.id;
-        const reply = sendMessage(chatId)
+
 
         try {
             // Get file path
@@ -49,26 +51,22 @@ app.post(`/webhook/${ BOT_TOKEN }`, async ( req, res ) => {
                     if (err) {
                         console.error('Error moving file:', err);
                         await reply('Error moving file')
-                        res.status(500).send('Error moving file.');
                     } else {
                         console.log(`File moved to ${ destinationPath }`);
                         await reply('moved file successfully')
-                        res.send('File uploaded to the server successfully.');
                     }
                 });
             } else {
                 console.error('File does not exist at source path:', sourcePath);
                 await reply('File not found')
-                res.status(404).send('File not found.');
             }
         }
         catch (error) {
             console.error('Error:', error && error.response ? error.response.data : error.toString());
-            await sendMessage(chatId, 'Error processing file.');
-            res.send('Error processing file.');
+            await reply('Error processing file')
         }
     } else {
-        res.send('No file found.');
+        await reply('file not found')
     }
 });
 
