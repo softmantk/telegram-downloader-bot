@@ -31,11 +31,29 @@ const editMessage = async (chatId, messageId, text) => {
     });
 };
 
-// Function to move and rename file
+// Updated function to move and rename file with fallback to copy
 const moveAndRenameFile = (source, destination, callback) => {
     fs.rename(source, destination, (err) => {
-        if (err) return callback(err);
-        callback(null); // Success
+        if (err) {
+            if (err.code === 'EXDEV') {
+                // Cross-device error, fallback to copy and delete
+                const readStream = fs.createReadStream(source);
+                const writeStream = fs.createWriteStream(destination);
+
+                readStream.on('error', callback);
+                writeStream.on('error', callback);
+
+                readStream.on('close', () => {
+                    fs.unlink(source, callback); // Delete the original file after copying
+                });
+
+                readStream.pipe(writeStream);
+            } else {
+                callback(err); // Handle other errors
+            }
+        } else {
+            callback(null); // Success
+        }
     });
 };
 
