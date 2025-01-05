@@ -3,13 +3,15 @@ const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const {default: PQueue} = require('p-queue');
 
 const app = express();
 const PORT = 3000;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH;
 const BASE_URL = process.env.BOT_SERVER_BASEURL;
-console.log('@@@ :CONFIGURATIONS: -------', { DOWNLOAD_PATH, BASE_URL });
+const queue = new PQueue({concurrency: 1});
+console.log('@@@ :CONFIGURATIONS: -------', {DOWNLOAD_PATH, BASE_URL});
 
 app.use(express.json());
 
@@ -96,42 +98,67 @@ const processFile = async (filePath, destinationPath, chatId, reply) => {
     });
 };
 
+let timer = null;
+const sendStatus = (reply) => {
+    timer && clearInterval(timer);
+    timer = setInterval(async () => {
+        await reply(`Queue --  Size: ${queue.size}  Pending: ${queue.pending}`);
+    }, 10000);
+}
+
+queue.on('idle', () => {
+    timer && clearInterval(timer);
+});
+
+const delayFn = (timeout = 1000) => new Promise((res) => setTimeout(res, timeout));
+
+const standardDelay = 0;
+
+const processRequest = async (fileId, message, reply) => {
+    try {
+        const originalFileName = message.document.file_name;
+        const url = `${BASE_URL}/bot${BOT_TOKEN}/getFile?file_id=${fileId}`;
+        // Use BASE_URL from environment variables to get file path
+        console.log("URL: ", url);
+        if (queue.pending > 2) {
+            await delayFn(30000);
+        }
+        const fileUrlResponse = await axios.get(url);
+
+        const filePath = path.join(fileUrlResponse.data.result.file_path); // Absolute path to the file
+
+        const destinationPath = path.join(DOWNLOAD_PATH, originalFileName);
+
+        console.log("FILE : ", JSON.stringify({
+            fileUrlResponse: fileUrlResponse.data,
+            filePath,
+            destinationPath
+        }, null, 2));
+
+        await reply(`${originalFileName}\nMoving file...`);
+        await processFile(filePath, destinationPath, chatId, reply);
+
+        await reply(`${originalFileName}\nFile moved to ${destinationPath}`);
+    } catch (error) {
+        console.error('Error:', error.response ? error.response.data : error);
+        await reply(`Error processing file: ${error.message}`);
+    }
+}
+
+
 app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
     console.log("Received webhook");
     const message = req.body.message;
     res.send("success");
     const chatId = message.chat.id;
     const reply = async (text) => await sendMessage(chatId, text);
-    console.log("MESSAGE: ", JSON.stringify(message, null,2));
+    console.log("MESSAGE: ", JSON.stringify(message, null, 2));
     if (message && message.document) {
         const fileId = message.document.file_id;
         const originalFileName = message.document.file_name;
-
-        try {
-            await reply(`Getting your file into our bot server...\n ${originalFileName}`);
-            const url = `${BASE_URL}/bot${BOT_TOKEN}/getFile?file_id=${fileId}`;
-            // Use BASE_URL from environment variables to get file path
-            console.log("URL: ", url)
-            const fileUrlResponse = await axios.get(url);
-
-            const filePath = path.join(fileUrlResponse.data.result.file_path); // Absolute path to the file
-
-            const destinationPath = path.join(DOWNLOAD_PATH, originalFileName);
-
-            console.log("FILE : ", JSON.stringify({
-                fileUrlResponse: fileUrlResponse.data,
-                filePath,
-                destinationPath
-            },null,2));
-
-            await reply(`${originalFileName}\nMoving file...`);
-            await processFile(filePath, destinationPath, chatId, reply);
-
-            await reply(`${originalFileName}\nFile moved to ${destinationPath}`);
-        } catch (error) {
-            console.error('Error:', error.response ? error.response.data : error);
-            await reply(`Error processing file: ${error.message}`);
-        }
+        await reply(`Getting your file into our bot server...\n ${originalFileName}`);
+        sendStatus(reply);
+        await queue.add(() => processRequest(fileId, message ,reply));
     } else {
         await reply('No document found in the message.');
     }
