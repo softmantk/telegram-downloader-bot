@@ -102,24 +102,25 @@ app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
     res.send("success");
     const chatId = message.chat.id;
     const reply = async (text) => await sendMessage(chatId, text);
-
+    console.log("MESSAGE: ", JSON.stringify(message, null,2));
     if (message && message.document) {
         const fileId = message.document.file_id;
         const originalFileName = message.document.file_name;
 
         try {
-            await reply(`${originalFileName}\nGetting your file into our bot server...`);
-
+            await reply(`Getting your file into our bot server...\n ${originalFileName}`);
+            const url = `${BASE_URL}/bot${BOT_TOKEN}/getFile?file_id=${fileId}`;
             // Use BASE_URL from environment variables to get file path
-            const fileUrlResponse = await axios.get(`${BASE_URL}/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
-            
+            console.log("URL: ", url)
+            const fileUrlResponse = await axios.get(url);
+
             const filePath = path.join(fileUrlResponse.data.result.file_path); // Absolute path to the file
-            
+
             const destinationPath = path.join(DOWNLOAD_PATH, originalFileName);
 
             console.log("FILE : ", JSON.stringify({
                 fileUrlResponse: fileUrlResponse.data,
-                filePath, 
+                filePath,
                 destinationPath
             },null,2));
 
