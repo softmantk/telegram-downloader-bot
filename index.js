@@ -48,7 +48,7 @@ const sendStatusUpdates = (reply) => {
     if (statusTimer) clearInterval(statusTimer);
     statusTimer = setInterval(async () => {
         await reply(`Queue Info: size=${queue.size}, pending=${queue.pending}`);
-    }, 10000);
+    }, 30000);
 };
 
 queue.on("idle", () => {
