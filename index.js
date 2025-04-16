@@ -7,6 +7,21 @@ const Bull = require("bull");
 const { createBullBoard } = require("@bull-board/api");
 const { BullAdapter } = require("@bull-board/api/bullAdapter");
 const { ExpressAdapter } = require("@bull-board/express");
+const winston = require("winston");
+
+// Configure Winston logger with timestamps
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp({
+      format: 'YYYY-MM-DD HH:mm:ss'
+    }),
+    winston.format.printf(info => `${info.timestamp} ${info.level}: ${info.message}`)
+  ),
+  transports: [
+    new winston.transports.Console()
+  ]
+});
 
 const app = express();
 app.use(express.json());
@@ -17,7 +32,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH;
 const BASE_URL = process.env.BOT_SERVER_BASEURL;
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
-console.log("CONFIG:", {PORT, BOT_TOKEN, DOWNLOAD_PATH, BASE_URL});
+logger.info(`CONFIG: ${JSON.stringify({PORT, BOT_TOKEN, DOWNLOAD_PATH, BASE_URL})}`);
 
 /** ========== Retry & Backoff Settings ========== */
 const MAX_RETRIES = 3; // maximum attempts
@@ -102,27 +117,27 @@ app.use('/admin/queues', (req, res, next) => {
 // Mount the Bull UI router
 app.use('/admin/queues', serverAdapter.getRouter());
 
-console.log(`Bull UI protected with basic auth (username: ${BULL_UI_USERNAME})`);
+logger.info(`Bull UI protected with basic auth (username: ${BULL_UI_USERNAME})`);
 
 // Queue event listeners for logging with detailed file information
 fileQueue.on('completed', (job, result) => {
-    console.log(`[COMPLETED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Size: ${job.data.message?.document?.file_size ? (job.data.message.document.file_size / (1024 * 1024)).toFixed(2) + ' MB' : 'Unknown'}`);
+    logger.info(`[COMPLETED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Size: ${job.data.message?.document?.file_size ? (job.data.message.document.file_size / (1024 * 1024)).toFixed(2) + ' MB' : 'Unknown'}`);
 });
 
 fileQueue.on('failed', (job, error) => {
-    console.error(`[FAILED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Error: ${error.message}`);
+    logger.error(`[FAILED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Error: ${error.message}`);
 });
 
 fileQueue.on('stalled', (job) => {
-    console.warn(`[STALLED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Attempt: ${job.attemptsMade}/${job.opts.attempts}`);
+    logger.warn(`[STALLED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Attempt: ${job.attemptsMade}/${job.opts.attempts}`);
 });
 
 fileQueue.on('active', (job) => {
-    console.log(`[ACTIVE] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Processing started`);
+    logger.info(`[ACTIVE] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Processing started`);
 });
 
 fileQueue.on('progress', (job, progress) => {
-    console.log(`[PROGRESS] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | ${progress}% complete`);
+    logger.info(`[PROGRESS] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | ${progress}% complete`);
 });
 
 /** ========== Telegram API Helper ========== */
@@ -151,7 +166,7 @@ async function telegramApiRequest({
         // For any Telegram error, we handle up to MAX_RETRIES with either 429-based or exponential backoff
         if (attempt < MAX_RETRIES) {
             const waitTime = getWaitTime(is429, attempt, retryAfterFromTelegram);
-            console.error(
+            logger.error(
                 `Telegram Error. Attempt=${attempt}, will retry in ${waitTime} seconds.`
             );
             await fallbackReply(`Telegram Error. Waiting ${waitTime} seconds before retry...`);
@@ -168,7 +183,7 @@ async function telegramApiRequest({
         }
 
         // If we reached here, we've hit max attempts
-        console.error("Max retries reached. Aborting request.");
+        logger.error("Max retries reached. Aborting request.");
         throw err; // Let the caller handle the final error
     }
 }
@@ -250,7 +265,7 @@ async function processFile(sourcePath, targetPath, chatId, reply, job) {
     return new Promise((resolve, reject) => {
         moveAndRenameFile(sourcePath, targetPath, async (err) => {
             if (err) {
-                console.error("Error moving file:", err);
+                logger.error(`Error moving file: ${err}`);
                 await editMessage(chatId, msgId, `Error: ${err.message}`);
                 return reject(err);
             }
@@ -284,12 +299,12 @@ async function processRequest(job) {
 
         const destinationPath = path.join(DOWNLOAD_PATH, originalFileName);
 
-        console.log("File Info:", {
+        logger.info(`File Info: ${JSON.stringify({
             originalFileName,
             fileId,
             filePathOnServer: absoluteFilePathOnServer,
             destinationPath,
-        });
+        })}`);
 
         // 3) Show user we are about to move file
         await reply(`${originalFileName}\nPreparing to move file...`);
@@ -302,7 +317,7 @@ async function processRequest(job) {
         
         return { success: true, filePath: destinationPath };
     } catch (error) {
-        console.error("processRequest Error:", error.response?.data || error.message);
+        logger.error(`processRequest Error: ${error.response?.data || error.message}`);
         await reply(`Error: ${error.message} \nFILE: ${message.document.file_name}`);
         throw error; // Rethrow to let Bull handle the retry
     }
@@ -330,7 +345,7 @@ async function sendQueueStatus(chatId) {
 
 /** ========== Webhook Endpoint ========== */
 app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
-    console.log("Webhook received");
+    logger.info("Webhook received");
     res.send("success");
 
     const {message} = req.body;
@@ -383,7 +398,7 @@ app.post('/retry/:jobId', async (req, res) => {
         await job.retry();
         res.json({ success: true, message: `Job ${jobId} queued for retry` });
     } catch (error) {
-        console.error(`Error retrying job ${jobId}:`, error);
+        logger.error(`Error retrying job ${jobId}: ${error}`);
         res.status(500).json({ error: error.message });
     }
 });
@@ -397,6 +412,6 @@ app.get("/", (req, res) => {
 
 /** ========== Listen ========== */
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Bull UI available at: http://localhost:${PORT}/admin/queues`);
+    logger.info(`Server running on port ${PORT}`);
+    logger.info(`Bull UI available at: http://localhost:${PORT}/admin/queues`);
 });
