@@ -9,6 +9,9 @@ const { BullAdapter } = require("@bull-board/api/bullAdapter");
 const { ExpressAdapter } = require("@bull-board/express");
 const winston = require("winston");
 
+// Track active downloads per chat
+const activeDownloads = new Map();
+
 // Configure Winston logger with timestamps
 const logger = winston.createLogger({
   level: 'info',
@@ -201,13 +204,116 @@ async function sendMessage(chatId, text) {
 }
 
 async function editMessage(chatId, messageId, text) {
-    await telegramApiRequest({
-        endpoint: "editMessageText",
-        method: "POST",
-        data: {chat_id: chatId, message_id: messageId, text},
-        chatId,
-        fallbackReply: async (msg) => sendMessage(chatId, msg),
-    });
+    try {
+        await telegramApiRequest({
+            endpoint: "editMessageText",
+            method: "POST",
+            data: {chat_id: chatId, message_id: messageId, text},
+            chatId,
+            fallbackReply: async (msg) => sendMessage(chatId, msg),
+        });
+        return true;
+    } catch (error) {
+        logger.error(`Error editing message: ${error.message}`);
+        return false;
+    }
+}
+
+/**
+ * Get or create a status message for a chat
+ * @param {number} chatId - The chat ID
+ * @param {string} jobId - The job ID (optional)
+ * @returns {Promise<number>} - The message ID
+ */
+async function getOrCreateStatusMessage(chatId, jobId = null) {
+    // Check if there's an active download for this chat
+    if (!activeDownloads.has(chatId)) {
+        // Create a new status message
+        const messageId = await sendMessage(chatId, "Initializing download...");
+        activeDownloads.set(chatId, {
+            messageId,
+            jobIds: jobId ? [jobId] : [],
+            lastUpdate: Date.now()
+        });
+        return messageId;
+    }
+    
+    // Use existing message if it's for the same job or no job specified
+    const downloadInfo = activeDownloads.get(chatId);
+    
+    // If a specific job ID is provided and it's not in the list, create a new message
+    if (jobId && !downloadInfo.jobIds.includes(jobId)) {
+        const messageId = await sendMessage(chatId, "Initializing new download...");
+        activeDownloads.set(chatId, {
+            messageId,
+            jobIds: [jobId],
+            lastUpdate: Date.now()
+        });
+        return messageId;
+    }
+    
+    return downloadInfo.messageId;
+}
+
+/**
+ * Update the status message for a chat
+ * @param {number} chatId - The chat ID
+ * @param {string} text - The text to update with
+ * @param {string} jobId - The job ID (optional)
+ * @returns {Promise<boolean>} - Whether the update was successful
+ */
+async function updateStatusMessage(chatId, text, jobId = null) {
+    if (!activeDownloads.has(chatId)) {
+        const messageId = await sendMessage(chatId, text);
+        activeDownloads.set(chatId, {
+            messageId,
+            jobIds: jobId ? [jobId] : [],
+            lastUpdate: Date.now()
+        });
+        return true;
+    }
+    
+    const downloadInfo = activeDownloads.get(chatId);
+    
+    // If a specific job ID is provided and it's not in the list, create a new message
+    if (jobId && !downloadInfo.jobIds.includes(jobId)) {
+        const messageId = await sendMessage(chatId, text);
+        activeDownloads.set(chatId, {
+            messageId,
+            jobIds: [jobId],
+            lastUpdate: Date.now()
+        });
+        return true;
+    }
+    
+    // Update the existing message
+    const success = await editMessage(chatId, downloadInfo.messageId, text);
+    if (success) {
+        downloadInfo.lastUpdate = Date.now();
+        activeDownloads.set(chatId, downloadInfo);
+    }
+    return success;
+}
+
+/**
+ * Remove a job from active downloads
+ * @param {number} chatId - The chat ID
+ * @param {string} jobId - The job ID to remove
+ */
+function removeJobFromActiveDownloads(chatId, jobId) {
+    if (!activeDownloads.has(chatId)) return;
+    
+    const downloadInfo = activeDownloads.get(chatId);
+    downloadInfo.jobIds = downloadInfo.jobIds.filter(id => id !== jobId);
+    
+    if (downloadInfo.jobIds.length === 0) {
+        // If no more jobs, remove the entry after a delay
+        setTimeout(() => {
+            activeDownloads.delete(chatId);
+        }, 5000); // 5 seconds delay before removing
+    } else {
+        activeDownloads.set(chatId, downloadInfo);
+    }
 }
 
 /** ========== File Operations ========== */
@@ -235,6 +341,7 @@ function moveAndRenameFile(source, destination, callback) {
 async function sendProgress(chatId, messageId, steps = 10, duration = 3000, job) {
     const interval = duration / steps;
     let lastPercentage = 0;
+    const fileName = job?.data?.fileName || '';
 
     for (let i = 1; i <= steps; i++) {
         await delayFn(interval);
@@ -247,29 +354,37 @@ async function sendProgress(chatId, messageId, steps = 10, duration = 3000, job)
         
         if (percentage !== lastPercentage) {
             const progressBar = `[${"▓".repeat(i)}${"░".repeat(steps - i)}] ${percentage}%`;
-            await editMessage(chatId, messageId, `Progress: ${progressBar}`);
+            const progressText = fileName ? 
+                `File: ${fileName}\nProgress: ${progressBar}` : 
+                `Progress: ${progressBar}`;
+                
+            if (messageId) {
+                await editMessage(chatId, messageId, progressText);
+            } else {
+                await updateStatusMessage(chatId, progressText, job?.id);
+            }
             lastPercentage = percentage;
         }
     }
 }
 
 /** ========== File Processing ========== */
-async function processFile(sourcePath, targetPath, chatId, reply, job) {
-    // 1. Send initial message
-    const msgId = await reply("Starting file move...");
+async function processFile(sourcePath, targetPath, chatId, job) {
+    // 1. Update status message
+    await updateStatusMessage(chatId, `Starting file move for: ${job.data.fileName}`, job.id);
 
     // 2. Send a fake progress bar
-    await sendProgress(chatId, msgId, 10, 3000, job);
+    await sendProgress(chatId, null, 10, 3000, job);
 
     // 3. Actually move the file
     return new Promise((resolve, reject) => {
         moveAndRenameFile(sourcePath, targetPath, async (err) => {
             if (err) {
                 logger.error(`Error moving file: ${err}`);
-                await editMessage(chatId, msgId, `Error: ${err.message}`);
+                await updateStatusMessage(chatId, `Error: ${err.message}\nFile: ${job.data.fileName}`, job.id);
                 return reject(err);
             }
-            await editMessage(chatId, msgId, `File successfully moved to ${targetPath}`);
+            await updateStatusMessage(chatId, `File ${job.data.fileName} successfully moved to ${targetPath}`, job.id);
             resolve();
         });
     });
@@ -279,10 +394,12 @@ async function processFile(sourcePath, targetPath, chatId, reply, job) {
 async function processRequest(job) {
     const { fileId, message } = job.data;
     const chatId = message.chat.id;
-    const reply = async (text) => sendMessage(chatId, text);
     
     try {
         const {file_name: originalFileName} = message.document;
+
+        // Register this job with the active downloads
+        await getOrCreateStatusMessage(chatId, job.id);
 
         // 1) Retrieve file info from Telegram (GET) with backoff
         const fileInfoData = await telegramApiRequest({
@@ -290,7 +407,7 @@ async function processRequest(job) {
             method: "GET",
             data: {file_id: fileId},
             chatId,
-            fallbackReply: async (msg) => sendMessage(chatId, msg),
+            fallbackReply: async (msg) => updateStatusMessage(chatId, msg, job.id),
         });
 
         // 2) Resolve path from the file info
@@ -306,19 +423,26 @@ async function processRequest(job) {
             destinationPath,
         })}`);
 
-        // 3) Show user we are about to move file
-        await reply(`${originalFileName}\nPreparing to move file...`);
+        // 3) Update status message
+        await updateStatusMessage(chatId, `${originalFileName}\nPreparing to move file...`, job.id);
 
         // 4) Process the file (move + progress)
-        await processFile(absoluteFilePathOnServer, destinationPath, chatId, reply, job);
+        await processFile(absoluteFilePathOnServer, destinationPath, chatId, job);
 
-        // 5) Notify success
-        await reply(`${originalFileName} has been moved to ${destinationPath}`);
+        // 5) Final status update
+        await updateStatusMessage(chatId, `File ${originalFileName} has been successfully moved to ${destinationPath}`, job.id);
+        
+        // 6) Clean up
+        removeJobFromActiveDownloads(chatId, job.id);
         
         return { success: true, filePath: destinationPath };
     } catch (error) {
         logger.error(`processRequest Error: ${error.response?.data || error.message}`);
-        await reply(`Error: ${error.message} \nFILE: ${message.document.file_name}`);
+        await updateStatusMessage(chatId, `Error: ${error.message}\nFILE: ${message.document.file_name}`, job.id);
+        
+        // Clean up on error
+        removeJobFromActiveDownloads(chatId, job.id);
+        
         throw error; // Rethrow to let Bull handle the retry
     }
 }
@@ -352,17 +476,15 @@ app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
     if (!message || !message.document) return;
 
     const chatId = message.chat.id;
-    const reply = async (text) => sendMessage(chatId, text);
+    const fileName = message.document.file_name;
 
-    await reply(`Request received for file: ${message.document.file_name}`);
-    
     // Add job to Bull queue
     const job = await fileQueue.add(
         {
             fileId: message.document.file_id,
             message,
-            fileName: message.document.file_name,
-            name: message.document.file_name // Include name in the data for display in UI
+            fileName,
+            name: fileName // Include name in the data for display in UI
         },
         {
             attempts: MAX_RETRIES,
@@ -373,10 +495,23 @@ app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
         }
     );
     
-    await reply(`Job #${job.id} added to queue for file: ${message.document.file_name}`);
+    // Create or update status message
+    await getOrCreateStatusMessage(chatId, job.id);
     
-    // Send queue status
-    await sendQueueStatus(chatId);
+    // Update the status message with job info
+    const jobCounts = await fileQueue.getJobCounts();
+    await updateStatusMessage(
+        chatId, 
+        `File: ${fileName}\n` +
+        `Job #${job.id} added to queue\n\n` +
+        `Queue Status:\n` +
+        `- Waiting: ${jobCounts.waiting}\n` +
+        `- Active: ${jobCounts.active}\n` +
+        `- Completed: ${jobCounts.completed}\n` +
+        `- Failed: ${jobCounts.failed}\n` +
+        `- Delayed: ${jobCounts.delayed}`,
+        job.id
+    );
 });
 
 /** ========== Queue Status Endpoint ========== */
