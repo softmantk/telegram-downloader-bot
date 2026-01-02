@@ -124,23 +124,31 @@ logger.info(`Bull UI protected with basic auth (username: ${BULL_UI_USERNAME})`)
 
 // Queue event listeners for logging with detailed file information
 fileQueue.on('completed', (job, result) => {
-    logger.info(`[COMPLETED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Size: ${job.data.message?.document?.file_size ? (job.data.message.document.file_size / (1024 * 1024)).toFixed(2) + ' MB' : 'Unknown'}`);
+    const fileSizeMB = job.data.fileSize ? (job.data.fileSize / (1024 * 1024)).toFixed(2) : 'Unknown';
+    const fileType = job.data.fileType || 'file';
+    logger.info(`[COMPLETED] Job ${job.id} | ${fileType.toUpperCase()}: ${job.data.fileName || 'Unknown'} | Size: ${fileSizeMB} MB`);
 });
 
 fileQueue.on('failed', (job, error) => {
-    logger.error(`[FAILED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Error: ${error.message}`);
+    const fileType = job.data.fileType || 'file';
+    console.log("error::: ", error)
+    job.log("error", error)
+    logger.error(`[FAILED] Job ${job.id} | ${fileType.toUpperCase()}: ${job.data.fileName || 'Unknown'} | Error: ${error.message}`);
 });
 
 fileQueue.on('stalled', (job) => {
-    logger.warn(`[STALLED] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Attempt: ${job.attemptsMade}/${job.opts.attempts}`);
+    const fileType = job.data.fileType || 'file';
+    logger.warn(`[STALLED] Job ${job.id} | ${fileType.toUpperCase()}: ${job.data.fileName || 'Unknown'} | Attempt: ${job.attemptsMade}/${job.opts.attempts}`);
 });
 
 fileQueue.on('active', (job) => {
-    logger.info(`[ACTIVE] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | Processing started`);
+    const fileType = job.data.fileType || 'file';
+    logger.info(`[ACTIVE] Job ${job.id} | ${fileType.toUpperCase()}: ${job.data.fileName || 'Unknown'} | Processing started`);
 });
 
 fileQueue.on('progress', (job, progress) => {
-    logger.info(`[PROGRESS] Job ${job.id} | File: ${job.data.fileName || 'Unknown'} | ${progress}% complete`);
+    const fileType = job.data.fileType || 'file';
+    logger.info(`[PROGRESS] Job ${job.id} | ${fileType.toUpperCase()}: ${job.data.fileName || 'Unknown'} | ${progress}% complete`);
 });
 
 /** ========== Telegram API Helper ========== */
@@ -151,9 +159,18 @@ async function telegramApiRequest({
     chatId,
     fallbackReply,
     attempt = 1,
+    job
 }) {
     const url = `${BASE_URL}/bot${BOT_TOKEN}/${endpoint}`;
-
+    console.log("@@@@: ---->", {
+        endpoint,
+        method,
+        data ,
+        chatId,
+        fallbackReply,
+        attempt,
+        job
+    });
     try {
         let resp;
         if (method === "GET") {
@@ -166,6 +183,16 @@ async function telegramApiRequest({
         const is429 = err?.response?.data?.error_code === 429;
         const retryAfterFromTelegram = err?.response?.data?.parameters?.retry_after || 30;
 
+        console.error("@@@AXIOS ERROR", {
+            message: err.message,
+            method: err.config?.method,
+            url: err.config?.url,
+            status: err.response?.status,
+            data: err.response?.data,
+            query: err.config?.params
+          });
+        job.log("error",err)
+        job.log(err)
         // For any Telegram error, we handle up to MAX_RETRIES with either 429-based or exponential backoff
         if (attempt < MAX_RETRIES) {
             const waitTime = getWaitTime(is429, attempt, retryAfterFromTelegram);
@@ -392,15 +419,19 @@ async function processFile(sourcePath, targetPath, chatId, job) {
 
 /** ========== Main Logic: processRequest ========== */
 async function processRequest(job) {
-    const { fileId, message } = job.data;
+    const { fileId, message, fileName, fileType, fileSize } = job.data;
     const chatId = message.chat.id;
-    
+    const originalFileName = fileName || "___";
     try {
-        const {file_name: originalFileName} = message.document;
+        // Get original file name from job data (already determined in webhook)
+        
+        const fileSizeMB = fileSize ? (fileSize / (1024 * 1024)).toFixed(2) : 'Unknown';
 
         // Register this job with the active downloads
         await getOrCreateStatusMessage(chatId, job.id);
 
+        logger.info(`Processing ${fileType}: ${originalFileName} (${fileSizeMB} MB)`);
+        job.log(`Processing ${fileType}: ${originalFileName} (${fileSizeMB} MB)`);
         // 1) Retrieve file info from Telegram (GET) with backoff
         const fileInfoData = await telegramApiRequest({
             endpoint: "getFile",
@@ -408,6 +439,7 @@ async function processRequest(job) {
             data: {file_id: fileId},
             chatId,
             fallbackReply: async (msg) => updateStatusMessage(chatId, msg, job.id),
+            job
         });
 
         // 2) Resolve path from the file info
@@ -416,29 +448,32 @@ async function processRequest(job) {
 
         const destinationPath = path.join(DOWNLOAD_PATH, originalFileName);
 
-        logger.info(`File Info: ${JSON.stringify({
+        logger.info(`${fileType.toUpperCase()} Info: ${JSON.stringify({
             originalFileName,
+            fileType,
+            fileSize: fileSizeMB + ' MB',
             fileId,
             filePathOnServer: absoluteFilePathOnServer,
             destinationPath,
         })}`);
 
         // 3) Update status message
-        await updateStatusMessage(chatId, `${originalFileName}\nPreparing to move file...`, job.id);
+        await updateStatusMessage(chatId, `${fileType.toUpperCase()}: ${originalFileName}\nSize: ${fileSizeMB} MB\nPreparing to move file...`, job.id);
 
         // 4) Process the file (move + progress)
         await processFile(absoluteFilePathOnServer, destinationPath, chatId, job);
 
         // 5) Final status update
-        await updateStatusMessage(chatId, `File ${originalFileName} has been successfully moved to ${destinationPath}`, job.id);
+        await updateStatusMessage(chatId, `${fileType.toUpperCase()}: ${originalFileName}\nSize: ${fileSizeMB} MB\nSuccessfully moved to ${destinationPath}`, job.id);
         
         // 6) Clean up
         removeJobFromActiveDownloads(chatId, job.id);
         
-        return { success: true, filePath: destinationPath };
+        return { success: true, filePath: destinationPath, fileType, fileSize };
     } catch (error) {
         logger.error(`processRequest Error: ${error.response?.data || error.message}`);
-        await updateStatusMessage(chatId, `Error: ${error.message}\nFILE: ${message.document.file_name}`, job.id);
+        console.log(error.response?.data || error.message);
+        await updateStatusMessage(chatId, `Error: ${error.message}\n${fileType.toUpperCase()}: ${originalFileName}`, job.id);
         
         // Clean up on error
         removeJobFromActiveDownloads(chatId, job.id);
@@ -473,17 +508,37 @@ app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
     res.send("success");
 
     const {message} = req.body;
-    if (!message || !message.document) return;
-
+    console.log("::::message ---> ", JSON.stringify(message, null,2));
+    
+    // Check if message contains either document or video
+    if (!message || (!message.document && !message.video)) return;
+    
     const chatId = message.chat.id;
-    const fileName = message.document.file_name;
+    let fileInfo, fileType;
+    
+    // Determine file type and extract relevant information
+    if (message.document) {
+        fileInfo = message.document;
+        fileType = 'document';
+    } else if (message.video) {
+        fileInfo = message.video;
+        fileType = 'video';
+    }
+    
+    const fileName = fileInfo.file_name || `video_${Date.now()}.mp4`;
+    const fileSize = fileInfo.file_size;
+    const fileSizeMB = fileSize ? (fileSize / (1024 * 1024)).toFixed(2) : 'Unknown';
+
+    logger.info(`Processing ${fileType}: ${fileName} (${fileSizeMB} MB)`);
 
     // Add job to Bull queue
     const job = await fileQueue.add(
         {
-            fileId: message.document.file_id,
+            fileId: fileInfo.file_id,
             message,
             fileName,
+            fileType,
+            fileSize,
             name: fileName // Include name in the data for display in UI
         },
         {
@@ -502,7 +557,8 @@ app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
     const jobCounts = await fileQueue.getJobCounts();
     await updateStatusMessage(
         chatId, 
-        `File: ${fileName}\n` +
+        `${fileType.toUpperCase()}: ${fileName}\n` +
+        `Size: ${fileSizeMB} MB\n` +
         `Job #${job.id} added to queue\n\n` +
         `Queue Status:\n` +
         `- Waiting: ${jobCounts.waiting}\n` +
@@ -541,7 +597,9 @@ app.post('/retry/:jobId', async (req, res) => {
 /** ========== Fallback GET ========== */
 app.get("/", (req, res) => {
     res.send(`
-        <h1>Telegram File Bot</h1>
+        <h1>Telegram File & Video Bot</h1>
+        <p>Supports downloading both documents and videos from Telegram</p>
+        <p><a href="/admin/queues">View Queue Dashboard</a></p>
     `);
 });
 
